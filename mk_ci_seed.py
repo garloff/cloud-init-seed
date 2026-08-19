@@ -106,7 +106,7 @@ def process_file_for_yaml(filepath: str):
     # Case 2: Try to see if it is valid UTF-8 text
     try:
         text_content = raw_data.decode('utf-8')
-        
+
         # Case 2a: It is text, but is it "safe" (no control chars)?
         if is_text_safe(text_content):
             return "text/plain", text_content.rstrip('\n')
@@ -252,7 +252,7 @@ def key_injections(keys, replace=False):
                     # Overwrite
                     for k in meta_data["keys"]:
                         if k["name"] == knm:
-                            k["type"] = ssh	# likely unchanged ...
+                            k["type"] = "ssh"  # likely unchanged ...
                             k["data"] = keycontent
                             break
                 else:
