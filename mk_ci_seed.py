@@ -5,21 +5,21 @@
  as defaults.
 Options -c/-i/-s can be specified multiple times.
 Options:
-  -c DIR:  directory with yaml snippets to be merged
-  -C DIR:  dito, but reset list
-  -i DIR:  directory with files to be injected
+  -c DIR   directory with yaml snippets to be merged (comma-separated)
+  -C DIR   dito, but reset list
+  -i DIR   directory with files to be injected
             Note: ':' will be replaced by '/', for ownership and permissions
             see options -o and -p
-  -I DIR:  dito, but reset list
-  -H NM:   hostname to be passed
-  -s KEYS: comma-separated list of SSH keyfile to add (use PUBLIC keys!)
-  -S KEYS: dito, but reset list
-  -r       OK to overwrite ssh keys
-  -U       regenerate UUID
+  -I DIR   dito, but reset list
   -o U:G   new default for user and group for file injection
             we start with root:root
   -m OCT   new default octal value for permissions (start: 0640)
   -p       do copy ownership and permissions (default: False, use o,m)
+  -s KEYS  comma-separated list of SSH keyfile to add (use PUBLIC keys!)
+  -S KEYS  dito, but reset list
+  -r       OK to overwrite ssh keys
+  -U       regenerate UUID
+  -H NM    hostname to be passed
 
 (c) Kurt Garloff <kurt@garloff.de>, 8/2026
 SPDX-License-Identifier: CC-BY-SA-4.0
@@ -30,7 +30,10 @@ import sys
 import pwd
 import grp
 import yaml
+import json
 import argparse
+import tempfile
+import subprocess
 
 # globals
 meta_data = {}
@@ -41,11 +44,14 @@ sshkeys = []
 files = {}
 defperm = 0o640
 
+
 def usage():
-    "Output usage instructions to stderr"
+    "Output usage instructions to stderr, somewhat duplicated with argparse --help"
     print(__doc__, file=sys.stderr)
 
+
 class injection:
+    "Data structure for file injections"
     def __init__(self, unm, gnm, perm,
                  name="/tmp/dummy", content=""):
         self.owner = unm
@@ -65,6 +71,9 @@ def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, 
     "analyze fname and create injection object"
     injname = iname.replace(':', '/')
     content = open(fname, "r").read().rstrip('\n')
+    # TODO
+    # - Detect binary data and large data (gzip)
+    # - Optionally support a macro processor (m4 or jinja2)
     if preserve:
         st = os.stat(fname)
         return injection(pwd.getpwuid(st.st_uid).pw_name,
@@ -72,6 +81,7 @@ def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, 
                          st.st_mode & 0o7777, injname, content)
     else:
         return injection(user, group, perm, injname, content)
+
 
 def file_injections(folder, preserve=False, user="root", group="root", perm=defperm, prefix=''):
     "Create dict with file injections from folder"
@@ -87,8 +97,9 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
                 inj = inject_file(fullnm, preserve, user, group, perm, pnm)
                 files[inj.name] = inj
 
+
 def apply_file_injections(files):
-    "Add injected files to user data"
+    "Add injected files to user_data"
     global user_data
     if not files:
         return
@@ -114,7 +125,9 @@ def yaml_injections(folder):
                     #print(f" add {doc}")
                     user_data.update(doc)
 
+
 def key_injections(keys, replace=False):
+    "Collect ssh keys to be injected"
     import os.path
     global meta_data
     meta_data["public_keys"] = {}
@@ -141,6 +154,11 @@ def key_injections(keys, replace=False):
                 if replace:
                     err = "WARNING"
                     spc = "  ->   "
+                    # Overwrite
+                    for k in meta_data["keys"]:
+                        if k["name"] == knm:
+                            k = {"name": knm, "type": "ssh", "data": keycontent}
+                            break
                 else:
                     err = "ERROR"
                     spc = "  -> "
@@ -148,8 +166,9 @@ def key_injections(keys, replace=False):
                 print(f"{err}: {meta_data['public_keys'][knm]}\n{spc}  {keycontent}", file=sys.stderr)
                 if not replace:
                     sys.exit(3)
+        else:
+            meta_data["keys"].append({"name": knm, "type": "ssh", "data": keycontent})
         meta_data["public_keys"][knm] = keycontent
-        meta_data["keys"].append({"name": knm, "type": "ssh", "data": keycontent})
 
 
 def defaults():
@@ -175,6 +194,7 @@ class MultiLineDumper(yaml.SafeDumper):
     pass
 
 def str_representer(dumper, data):
+    "Prefer literal block style for strings"
     if '\n' in data:
         # Use '|' for literal block style
         return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
@@ -183,13 +203,51 @@ def str_representer(dumper, data):
 # Register the representer with our custom Dumper
 MultiLineDumper.add_representer(str, str_representer)
 
+
+def run_command(cmd):
+    "capture_stdout is not available in old py3, so use PIPE"
+    # universal_newlines=True ensures we get strings instead of bytes.
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    rc = result.returncode
+
+    if rc != 0:
+        print(f"ERROR: {cmd} failed with exit code {rc}", file=sys.stderr)
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
+    return rc
+
+
 def make_iso(outputfile):
     "Create cloud-config file into outputfile"
-    pass
+    tdir = tempfile.mkdtemp(suffix=".dir", dir=os.path.dirname(outputfile))
+    lpath = tdir + "/openstack/latest/"
+    os.makedirs(lpath)
+    with open(lpath+"meta_data.json", "w") as out:
+        json.dump(meta_data, out)
+    with open(lpath+"user_data", "w") as out:
+        print("#cloud-config", file=out)
+        yaml.dump(user_data, out, Dumper=MultiLineDumper, sort_keys=False)
+    # mkisofs -o $outputfile -preparer mk_seed_ci.py -V config-2 -J -R $tdir >/dev/null 2>&1
+    rc = run_command(["mkisofs", "-o", outputfile, "-preparer", "mk_seed_ci.py",
+                      "-V", "config-2", "-J", "-R", tdir])
+    # Clean up
+    # shutil.rmtree(tdir)
+    os.remove(lpath+"user_data")
+    os.remove(lpath+"meta_data.json")
+    os.rmdir(lpath)
+    os.rmdir(tdir+"/openstack")
+    os.rmdir(tdir)
+    if rc:
+        sys.exit(rc)
+
 
 def parse_iso(outputfile):
     "Read ISO and parse settings"
     global meta_data, user_data, i_uuid, hostname, sshkeys, files
+
 
 def main(argv):
     "Entrypoint"
@@ -204,9 +262,12 @@ def main(argv):
     gid = "root"
     mode = defperm
     # Process options
-    parser = argparse.ArgumentParser(description="mk_ci_seed.py cloud-init ISO processor")
+    parser = argparse.ArgumentParser(description="""mk_ci_seed.py cloud-init ISO processor.
+It will read the ISO file if it exists and parse it,
+defaults will be used otherwise.  Options -s, -c, -i can be used multiple times,
+but they also accept comma-separated lists.""", epilog="""(c) Kurt Garloff <kurt@garloff.de>, 8/2026
+SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("isofile", help="The name of the ISO file to read/generate (mandatory).")
-    parser.add_argument("-U", "--regenerate-uuid", action="store_true", help="Force UUID regeneration (default: False)")
     #parser.add_argument("-h", "--help", action="help", help="Help")
     parser.add_argument("-r", "--sshkey-overwrite", action="store_true",  help="Allow ssh keys to be replaced")
     parser.add_argument("-s", "--sshkey", action="append",  help="Add ssh keys (comma separated list)")
@@ -215,10 +276,11 @@ def main(argv):
     parser.add_argument("-C", "--config-reset", action="append",  help="Replace user data with YAML snippets from directory")
     parser.add_argument("-i", "--inject", action="append",  help="Add Files to inject from directory tree")
     parser.add_argument("-I", "--inject-reset", action="append",  help="Replace files to inject from directory tree")
-    parser.add_argument("-H", "--hostname", help="Set the hostname (default: read or randomly generated)")
     parser.add_argument("-o", "--owner", help="Set username:groupname (if preserve is not set), default root:root")
     parser.add_argument("-m", "--mode", help="Set acccess mode (octal value) to be used if preserve is not set, default 0640")
     parser.add_argument("-p", "--preserve", action="store_true", help="Copy owner and access mode from original file (default False)")
+    parser.add_argument("-U", "--regenerate-uuid", action="store_true", help="Force UUID regeneration (default: False)")
+    parser.add_argument("-H", "--hostname", help="Set the hostname (default: read or randomly generated)")
     args = parser.parse_args(argv[1:])
     #print(args)
     parse_iso(args.isofile)
@@ -260,11 +322,14 @@ def main(argv):
         yaml_injections(cdir)
     for fdir in inject_dirs:
         file_injections(fdir, args.preserve, uid, gid, mode)
-    print(meta_data)
+    #print(meta_data)
     #print(files)
     apply_file_injections(files)
-    print('#cloud-config')
-    print(yaml.dump(user_data, Dumper=MultiLineDumper))
+    #print('#cloud-config')
+    #print(yaml.dump(user_data, Dumper=MultiLineDumper, sort_keys=False))
+    make_iso(args.isofile)
+    #print(f"Pass a cdrom (scsi-cd) device named cidata with backing file {isofile} to qemu ...")
+
 
 if __name__ == "__main__":
     main(sys.argv)
