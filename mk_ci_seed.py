@@ -98,6 +98,20 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
                 files[inj.name] = inj
 
 
+
+def append_or_replace(path, inj, udata):
+    "Append inj to udata if not in there yet, otherwise update"
+    for wf in udata:
+        if wf["path"] == path:
+            if wf.get("content") != inj.content:
+                print(f"WARNING: write_files {path} replaced with {inj.content}")
+            #else:
+            #    print(f"INFO: write_files {path} found with identical content")
+            wf = inj.__dict__()
+            return
+    udata.append(inj.__dict__())
+
+
 def apply_file_injections(files):
     "Add injected files to user_data"
     global user_data
@@ -107,14 +121,7 @@ def apply_file_injections(files):
         user_data["write_files"] = []
     for key,ifile in files.items():
         # Avoid duplication
-        found = False
-        for wf in user_data["write_files"]:
-            if wf["path"] == ifile.name:
-                wf = ifile.__dict__()
-                found = True
-                break
-        if not found:
-            user_data["write_files"].append(ifile.__dict__())
+        append_or_replace(key, ifile, user_data["write_files"])
 
 
 def yaml_injections(folder):
@@ -142,7 +149,15 @@ def key_injections(keys, replace=False):
     meta_data["keys"] = []
     for key in keys:
         knm = None
-        keycontent = open(key, "r").read().rstrip('\n')
+        # Special case: When we extract keys from existing ISO, we don't have a file
+        if key.startswith("<<</"):
+            idx = key.find("\n")
+            if idx == -1:
+                print(f"ERROR: Illegal key content {key}", file=sys.stderr)
+                sys.exit(4)
+            keycontent = key[idx+1:]
+        else:
+            keycontent = open(key, "r").read().rstrip('\n')
         # Protect against accidentially injecting PRIVATE keys
         if keycontent.startswith("-----BEGIN RSA PRIVATE KEY-----"):
             print(f"ERROR: Reject private key {key} for injection", file=sys.stderr)
@@ -267,12 +282,21 @@ def parse_iso(outputfile):
         hostname = meta_data["hostname"]
     if "uuid" in meta_data:
         i_uuid = meta_data["uuid"]
-    # TODO: ssh_keys
+    # ssh_keys
+    if "public_keys" in meta_data:
+        for knm, kcont in meta_data["public_keys"].items():
+            sshkeys.append(f"<<</{knm}.pub\n{kcont}")
     ret = run_command(["isoinfo", "-R", "-i", outputfile, "-x", "/openstack/latest/user_data"])
     if ret.returncode:
         sys.exit(ret.returncode)
     user_data = yaml.safe_load(ret.stdout)
-    # TODO: Extract write_files
+    # Extract write_files
+    if "write_files" in user_data:
+        for ifile in user_data["write_files"]:
+            usr,grp = ifile["owner"].split(":")
+            perm = ifile.get("permissions") or defperm
+            path = ifile["path"]
+            files[path] = injection(usr, grp, perm, ifile["path"], ifile.get("content"))
 
 
 def main(argv):
