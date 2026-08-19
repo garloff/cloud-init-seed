@@ -87,6 +87,17 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
                 inj = inject_file(fullnm, preserve, user, group, perm, pnm)
                 files[inj.name] = inj
 
+def apply_file_injections(files):
+    "Add injected files to user data"
+    global user_data
+    if not files:
+        return
+    if not "write_files" in user_data:
+        user_data["write_files"] = []
+    for key,ifile in files.items():
+        user_data["write_files"].append(ifile.__dict__())
+
+
 def yaml_injections(folder):
     "Create dict with yaml pieces from folder"
     with os.scandir(folder) as it:
@@ -158,6 +169,19 @@ def defaults():
         meta_data["name"] = hostname[0:idx]
     meta_data["random_seed"] = base64.b64encode(secrets.token_bytes(512)).decode()
 
+
+# LLM helped ...
+class MultiLineDumper(yaml.SafeDumper):
+    pass
+
+def str_representer(dumper, data):
+    if '\n' in data:
+        # Use '|' for literal block style
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
+# Register the representer with our custom Dumper
+MultiLineDumper.add_representer(str, str_representer)
 
 def make_iso(outputfile):
     "Create cloud-config file into outputfile"
@@ -237,8 +261,10 @@ def main(argv):
     for fdir in inject_dirs:
         file_injections(fdir, args.preserve, uid, gid, mode)
     print(meta_data)
-    print(yaml.dump(user_data))
-    print(files)
+    #print(files)
+    apply_file_injections(files)
+    print('#cloud-config')
+    print(yaml.dump(user_data, Dumper=MultiLineDumper))
 
 if __name__ == "__main__":
     main(sys.argv)
