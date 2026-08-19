@@ -285,7 +285,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
     #print(args)
     parse_iso(args.isofile)
     if args.hostname:
-        hostame = args.hostname
+        hostname = args.hostname
     if args.regenerate_uuid:
         i_uuid = None
     if args.mode:
