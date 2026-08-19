@@ -43,11 +43,17 @@ hostname = None
 sshkeys = []
 files = {}
 defperm = 0o640
+debug = False
 
 
 def usage():
     "Output usage instructions to stderr, somewhat duplicated with argparse --help"
     print(__doc__, file=sys.stderr)
+
+
+def debug_print(*args, **kwa):
+    if debug:
+        print(*args, **kwa)
 
 
 class injection:
@@ -59,10 +65,12 @@ class injection:
         self.permission = perm
         self.name = name
         self.content = content
+
     def __dict__(self):
         return {"path": self.name, "content": self.content,
                 "owner": self.owner+":"+self.group,
                 "permissions": oct(self.permission)}
+
     def __repr__(self):
         return str(self.__dict__())
 
@@ -98,15 +106,14 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
                 files[inj.name] = inj
 
 
-
 def append_or_replace(path, inj, udata):
     "Append inj to udata if not in there yet, otherwise update"
     for wf in udata:
         if wf["path"] == path:
             if wf.get("content") != inj.content:
                 print(f"WARNING: write_files {path} replaced with {inj.content}")
-            #else:
-            #    print(f"INFO: write_files {path} found with identical content")
+            # else:
+            #     print(f"INFO: write_files {path} found with identical content")
             wf = inj.__dict__()
             return
     udata.append(inj.__dict__())
@@ -117,9 +124,9 @@ def apply_file_injections(files):
     global user_data
     if not files:
         return
-    if not "write_files" in user_data:
+    if "write_files" not in user_data:
         user_data["write_files"] = []
-    for key,ifile in files.items():
+    for key, ifile in files.items():
         # Avoid duplication
         append_or_replace(key, ifile, user_data["write_files"])
 
@@ -137,7 +144,7 @@ def yaml_injections(folder):
             if fnm.is_file():
                 dct = yaml.full_load_all(open(fullnm, 'r'))
                 for doc in dct:
-                    #print(f" add {doc}")
+                    debug_print(f" add {doc}")
                     user_data.update(doc)
 
 
@@ -196,7 +203,9 @@ def key_injections(keys, replace=False):
 
 def defaults():
     "Fill meta_data with defaults (generating random i_uuid nad hostname if needed)"
-    import secrets, base64, uuid
+    import secrets
+    import base64
+    import uuid
     global meta_data, i_uuid, hostname
     if not i_uuid:
         i_uuid = str(uuid.uuid4())
@@ -216,12 +225,14 @@ def defaults():
 class MultiLineDumper(yaml.SafeDumper):
     pass
 
+
 def str_representer(dumper, data):
     "Prefer literal block style for strings"
     if '\n' in data:
         # Use '|' for literal block style
         return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
     return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
 
 # Register the representer with our custom Dumper
 MultiLineDumper.add_representer(str, str_representer)
@@ -293,7 +304,7 @@ def parse_iso(outputfile):
     # Extract write_files
     if "write_files" in user_data:
         for ifile in user_data["write_files"]:
-            usr,grp = ifile["owner"].split(":")
+            usr, grp = ifile["owner"].split(":")
             perm = ifile.get("permissions") or defperm
             path = ifile["path"]
             files[path] = injection(usr, grp, perm, ifile["path"], ifile.get("content"))
@@ -301,7 +312,7 @@ def parse_iso(outputfile):
 
 def main(argv):
     "Entrypoint"
-    global i_uuid, hostname, sshkeys, files
+    global i_uuid, hostname, sshkeys, files, debug
     if len(argv) < 2:
         usage()
         sys.exit(1)
@@ -318,21 +329,23 @@ defaults will be used otherwise.  Options -s, -c, -i can be used multiple times,
 but they also accept comma-separated lists.""", epilog="""(c) Kurt Garloff <kurt@garloff.de>, 8/2026
 SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("isofile", help="The name of the ISO file to read/generate (mandatory).")
-    #parser.add_argument("-h", "--help", action="help", help="Help")
-    parser.add_argument("-r", "--sshkey-overwrite", action="store_true",  help="Allow ssh keys to be replaced")
-    parser.add_argument("-s", "--sshkey", action="append",  help="Add ssh keys (comma separated list)")
-    parser.add_argument("-S", "--sshkey-reset", action="append",  help="Replaces ssh keys (comma separated list)")
-    parser.add_argument("-c", "--config", action="append",  help="Add YAML snippets directory")
-    parser.add_argument("-C", "--config-reset", action="append",  help="Replace user data with YAML snippets from directory")
-    parser.add_argument("-i", "--inject", action="append",  help="Add Files to inject from directory tree")
-    parser.add_argument("-I", "--inject-reset", action="append",  help="Replace files to inject from directory tree")
+    parser.add_argument("-r", "--sshkey-overwrite", action="store_true", help="Allow ssh keys to be replaced")
+    parser.add_argument("-s", "--sshkey", action="append", help="Add ssh keys (comma separated list)")
+    parser.add_argument("-S", "--sshkey-reset", action="append", help="Replaces ssh keys (comma separated list)")
+    parser.add_argument("-c", "--config", action="append", help="Add YAML snippets directory")
+    parser.add_argument("-C", "--config-reset", action="append", help="Replace user data with YAML snippets from directory")
+    parser.add_argument("-i", "--inject", action="append", help="Add Files to inject from directory tree")
+    parser.add_argument("-I", "--inject-reset", action="append", help="Replace files to inject from directory tree")
     parser.add_argument("-o", "--owner", help="Set username:groupname (if preserve is not set), default root:root")
     parser.add_argument("-m", "--mode", help="Set acccess mode (octal value) to be used if preserve is not set, default 0640")
     parser.add_argument("-p", "--preserve", action="store_true", help="Copy owner and access mode from original file (default False)")
     parser.add_argument("-U", "--regenerate-uuid", action="store_true", help="Force UUID regeneration (default: False)")
     parser.add_argument("-H", "--hostname", help="Set the hostname (default: read or randomly generated)")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enabled debugging output (default: False)")
     args = parser.parse_args(argv[1:])
-    #print(args)
+    if args.debug:
+        debug = True
+    debug_print(args)
     parse_iso(args.isofile)
     if args.hostname:
         hostname = args.hostname
@@ -349,22 +362,22 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
             print(f"WARNING: Problems with parsing -o {args.owner}", file=sys.stderr)
     # SSH keys
     if args.sshkey_reset:
-        sshkeys = [ key for it in args.sshkey_reset for key in it.split(",") ]
+        sshkeys = [key for it in args.sshkey_reset for key in it.split(",")]
     if args.sshkey:
-        sshkeys.extend([ key for it in args.sshkey for key in it.split(",") ])
-    #print(sshkeys)
+        sshkeys.extend([key for it in args.sshkey for key in it.split(",")])
+    # print(sshkeys)
     # Files for injection
     if args.inject_reset:
-        inject_dirs = [ dnm for it in args.inject_reset for dnm in it.split(",") ]
+        inject_dirs = [dnm for it in args.inject_reset for dnm in it.split(",")]
     if args.inject:
-        inject_dirs.extend([ dnm for it in args.inject for dnm in it.split(",") ])
-    #print(inject_dirs)
+        inject_dirs.extend([dnm for it in args.inject for dnm in it.split(",")])
+    # print(inject_dirs)
     # YAML config snippets
     if args.config_reset:
-        config_dirs = [ dnm for it in args.config_reset for dnm in it.split(",") ]
+        config_dirs = [dnm for it in args.config_reset for dnm in it.split(",")]
     if args.config:
-        config_dirs.extend([ dnm for it in args.config for dnm in it.split(",") ])
-    #print(config_dirs)
+        config_dirs.extend([dnm for it in args.config for dnm in it.split(",")])
+    # print(config_dirs)
     # Compose result
     defaults()
     key_injections(sshkeys, args.sshkey_overwrite)
@@ -372,13 +385,13 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
         yaml_injections(cdir)
     for fdir in inject_dirs:
         file_injections(fdir, args.preserve, uid, gid, mode)
-    #print(meta_data)
-    #print(files)
+    # print(meta_data)
+    # print(files)
     apply_file_injections(files)
-    #print('#cloud-config')
-    #print(yaml.dump(user_data, Dumper=MultiLineDumper, sort_keys=False))
+    # print('#cloud-config')
+    # print(yaml.dump(user_data, Dumper=MultiLineDumper, sort_keys=False))
     make_iso(args.isofile)
-    #print(f"Pass a cdrom (scsi-cd) device named cidata with backing file {isofile} to qemu ...")
+    # print(f"Pass a cdrom (scsi-cd) device named cidata with backing file {isofile} to qemu ...")
 
 
 if __name__ == "__main__":
