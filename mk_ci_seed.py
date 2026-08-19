@@ -26,14 +26,18 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 """
 
 import os
+import os.path
 import sys
 import pwd
 import grp
-import yaml
+import secrets
+import base64
+import uuid
 import json
 import argparse
 import tempfile
 import subprocess
+import yaml
 
 # globals
 meta_data = {}
@@ -52,11 +56,12 @@ def usage():
 
 
 def debug_print(*args, **kwa):
+    "Wrapper for print only if debug is set"
     if debug:
         print(*args, **kwa)
 
 
-class injection:
+class Injection:
     "Data structure for file injections"
     def __init__(self, unm, gnm, perm,
                  name="/tmp/dummy", content=""):
@@ -66,33 +71,33 @@ class injection:
         self.name = name
         self.content = content
 
-    def __dict__(self):
+    def dict(self):
         return {"path": self.name, "content": self.content,
                 "owner": self.owner+":"+self.group,
                 "permissions": oct(self.permission)}
 
     def __repr__(self):
-        return str(self.__dict__())
+        return str(self.dict())
 
 
 def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, iname=''):
     "analyze fname and create injection object"
     injname = iname.replace(':', '/')
-    content = open(fname, "r").read().rstrip('\n')
+    content = open(fname, "r", encoding="utf-8").read().rstrip('\n')
     # TODO
     # - Detect binary data and large data (gzip)
     # - Optionally support a macro processor (m4 or jinja2)
     if preserve:
         st = os.stat(fname)
-        return injection(pwd.getpwuid(st.st_uid).pw_name,
+        return Injection(pwd.getpwuid(st.st_uid).pw_name,
                          grp.getgrgid(st.st_gid).gr_name,
                          st.st_mode & 0o7777, injname, content)
-    else:
-        return injection(user, group, perm, injname, content)
+    return Injection(user, group, perm, injname, content)
 
 
 def file_injections(folder, preserve=False, user="root", group="root", perm=defperm, prefix=''):
     "Create dict with file injections from folder"
+    global files
     with os.scandir(folder) as it:
         for fnm in it:
             if fnm.name.startswith('.'):
@@ -104,6 +109,7 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
             if fnm.is_file():
                 inj = inject_file(fullnm, preserve, user, group, perm, pnm)
                 files[inj.name] = inj
+    return None
 
 
 def append_or_replace(path, inj, udata):
@@ -114,19 +120,19 @@ def append_or_replace(path, inj, udata):
                 print(f"WARNING: write_files {path} replaced with {inj.content}")
             # else:
             #     print(f"INFO: write_files {path} found with identical content")
-            wf = inj.__dict__()
+            wf = inj.dict()
             return
-    udata.append(inj.__dict__())
+    udata.append(inj.dict())
 
 
-def apply_file_injections(files):
+def apply_file_injections(ifiles):
     "Add injected files to user_data"
     global user_data
-    if not files:
+    if not ifiles:
         return
     if "write_files" not in user_data:
         user_data["write_files"] = []
-    for key, ifile in files.items():
+    for key, ifile in ifiles.items():
         # Avoid duplication
         append_or_replace(key, ifile, user_data["write_files"])
 
@@ -142,15 +148,15 @@ def yaml_injections(folder):
             if fnm.is_dir():
                 return yaml_injections(fullnm)
             if fnm.is_file():
-                dct = yaml.full_load_all(open(fullnm, 'r'))
+                dct = yaml.full_load_all(open(fullnm, 'r', encoding="utf-8"))
                 for doc in dct:
                     debug_print(f" add {doc}")
                     user_data.update(doc)
+    return None
 
 
 def key_injections(keys, replace=False):
     "Collect ssh keys to be injected"
-    import os.path
     global meta_data
     meta_data["public_keys"] = {}
     meta_data["keys"] = []
@@ -203,9 +209,6 @@ def key_injections(keys, replace=False):
 
 def defaults():
     "Fill meta_data with defaults (generating random i_uuid nad hostname if needed)"
-    import secrets
-    import base64
-    import uuid
     global meta_data, i_uuid, hostname
     if not i_uuid:
         i_uuid = str(uuid.uuid4())
@@ -241,7 +244,8 @@ MultiLineDumper.add_representer(str, str_representer)
 def run_command(cmd):
     "capture_stdout is not available in old py3, so use PIPE"
     # universal_newlines=True ensures we get strings instead of bytes.
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, check=False)
     rc = result.returncode
 
     if rc != 0:
@@ -259,9 +263,9 @@ def make_iso(outputfile):
     tdir = tempfile.mkdtemp(suffix=".dir", dir=os.path.dirname(outputfile))
     lpath = tdir + "/openstack/latest/"
     os.makedirs(lpath)
-    with open(lpath+"meta_data.json", "w") as out:
+    with open(lpath+"meta_data.json", "w", encoding="utf-8") as out:
         json.dump(meta_data, out)
-    with open(lpath+"user_data", "w") as out:
+    with open(lpath+"user_data", "w", encoding="utf-8") as out:
         print("#cloud-config", file=out)
         yaml.dump(user_data, out, Dumper=MultiLineDumper, sort_keys=False)
     # mkisofs -o $outputfile -preparer mk_seed_ci.py -V config-2 -J -R $tdir >/dev/null 2>&1
@@ -304,15 +308,15 @@ def parse_iso(outputfile):
     # Extract write_files
     if "write_files" in user_data:
         for ifile in user_data["write_files"]:
-            usr, grp = ifile["owner"].split(":")
+            user, group = ifile["owner"].split(":")
             perm = ifile.get("permissions") or defperm
             path = ifile["path"]
-            files[path] = injection(usr, grp, perm, ifile["path"], ifile.get("content"))
+            files[path] = Injection(user, group, perm, ifile["path"], ifile.get("content"))
 
 
 def main(argv):
     "Entrypoint"
-    global i_uuid, hostname, sshkeys, files, debug
+    global i_uuid, hostname, sshkeys, debug
     if len(argv) < 2:
         usage()
         sys.exit(1)
@@ -365,19 +369,19 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
         sshkeys = [key for it in args.sshkey_reset for key in it.split(",")]
     if args.sshkey:
         sshkeys.extend([key for it in args.sshkey for key in it.split(",")])
-    # print(sshkeys)
+    debug_print(sshkeys)
     # Files for injection
     if args.inject_reset:
         inject_dirs = [dnm for it in args.inject_reset for dnm in it.split(",")]
     if args.inject:
         inject_dirs.extend([dnm for it in args.inject for dnm in it.split(",")])
-    # print(inject_dirs)
+    debug_print(inject_dirs)
     # YAML config snippets
     if args.config_reset:
         config_dirs = [dnm for it in args.config_reset for dnm in it.split(",")]
     if args.config:
         config_dirs.extend([dnm for it in args.config for dnm in it.split(",")])
-    # print(config_dirs)
+    debug_print(config_dirs)
     # Compose result
     defaults()
     key_injections(sshkeys, args.sshkey_overwrite)
@@ -385,13 +389,13 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
         yaml_injections(cdir)
     for fdir in inject_dirs:
         file_injections(fdir, args.preserve, uid, gid, mode)
-    # print(meta_data)
-    # print(files)
+    debug_print(meta_data)
+    debug_print(files)
     apply_file_injections(files)
-    # print('#cloud-config')
-    # print(yaml.dump(user_data, Dumper=MultiLineDumper, sort_keys=False))
+    debug_print('#cloud-config')
+    debug_print(yaml.dump(user_data, Dumper=MultiLineDumper, sort_keys=False))
     make_iso(args.isofile)
-    # print(f"Pass a cdrom (scsi-cd) device named cidata with backing file {isofile} to qemu ...")
+    debug_print(f"Pass a cdrom (scsi-cd) device named cidata with backing file {args.isofile} to qemu ...")
 
 
 if __name__ == "__main__":
