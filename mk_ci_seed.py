@@ -27,6 +27,8 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 
 import os
 import sys
+import pwd
+import grp
 import yaml
 import argparse
 
@@ -37,7 +39,7 @@ i_uuid = None
 hostname = None
 sshkeys = []
 files = {}
-defperm = int("0640", base=8)
+defperm = 0o640
 
 def usage():
     "Output usage instructions to stderr"
@@ -51,27 +53,55 @@ class injection:
         self.permission = perm
         self.name = name
         self.content = content
+    def __dict__(self):
+        return {"path": self.name, "content": self.content,
+                "owner": self.owner+":"+self.group,
+                "permissions": oct(self.permission)}
+    def __repr__(self):
+        return str(self.__dict__())
 
-def inject_file(fname, preserve=False, user="root", group="root", perm=defperm):
+
+def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, iname=''):
     "analyze fname and create injection object"
-    # FIXME: Preprend '/' ?
-    injname = fname.replace(':', '/')
+    injname = iname.replace(':', '/')
     content = open(fname, "r").read().rstrip('\n')
-    return injection(user, group, perm, injname, content) 
+    if preserve:
+        st = os.stat(fname)
+        return injection(pwd.getpwuid(st.st_uid).pw_name,
+                         grp.getgrgid(st.st_gid).gr_name,
+                         st.st_mode & 0o7777, injname, content)
+    else:
+        return injection(user, group, perm, injname, content)
 
-def file_injections(folders, preserve=False, user="root", group="root", perm=defperm):
+def file_injections(folder, preserve=False, user="root", group="root", perm=defperm, prefix=''):
     "Create dict with file injections from folder"
-    pass
+    with os.scandir(folder) as it:
+        for fnm in it:
+            if fnm.name.startswith('.'):
+                continue
+            fullnm = folder+'/'+fnm.name
+            pnm = prefix+'/'+fnm.name
+            if fnm.is_dir():
+                return file_injections(fullnm, preserve, user, group, perm, pnm)
+            if fnm.is_file():
+                inj = inject_file(fullnm, preserve, user, group, perm, pnm)
+                files[inj.name] = inj
 
-def yaml_injections(folders):
+def yaml_injections(folder):
     "Create dict with yaml pieces from folder"
-    # FIXME: Detect subdirectories and process (unless hidden)
-    for folder in folders:
-        for fnm in os.listdir(folder):
-            dct = yaml.full_load_all(open(folder+'/'+fnm, 'r'))
-            for doc in dct:
-                #print(f" add {doc}")
-                user_data.update(doc)
+    with os.scandir(folder) as it:
+        for fnm in it:
+            # Ignore hidden files / subdirectories
+            if fnm.name.startswith('.'):
+                continue
+            fullnm = folder+'/'+fnm.name
+            if fnm.is_dir():
+                return yaml_injections(fullnm)
+            if fnm.is_file():
+                dct = yaml.full_load_all(open(fullnm, 'r'))
+                for doc in dct:
+                    #print(f" add {doc}")
+                    user_data.update(doc)
 
 def key_injections(keys, replace=False):
     import os.path
@@ -202,11 +232,13 @@ def main(argv):
     # Compose result
     defaults()
     key_injections(sshkeys, args.sshkey_overwrite)
-    yaml_injections(config_dirs)
-    file_injections(config_dirs, args.preserve, uid, gid, mode)
+    for cdir in config_dirs:
+        yaml_injections(cdir)
+    for fdir in inject_dirs:
+        file_injections(fdir, args.preserve, uid, gid, mode)
     print(meta_data)
     print(yaml.dump(user_data))
-
+    print(files)
 
 if __name__ == "__main__":
     main(sys.argv)
