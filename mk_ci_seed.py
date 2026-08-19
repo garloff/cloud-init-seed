@@ -106,7 +106,15 @@ def apply_file_injections(files):
     if not "write_files" in user_data:
         user_data["write_files"] = []
     for key,ifile in files.items():
-        user_data["write_files"].append(ifile.__dict__())
+        # Avoid duplication
+        found = False
+        for wf in user_data["write_files"]:
+            if wf["path"] == ifile.name:
+                wf = ifile.__dict__()
+                found = True
+                break
+        if not found:
+            user_data["write_files"].append(ifile.__dict__())
 
 
 def yaml_injections(folder):
@@ -217,7 +225,7 @@ def run_command(cmd):
         if result.stderr:
             print(result.stderr, file=sys.stderr)
 
-    return rc
+    return result
 
 
 def make_iso(outputfile):
@@ -231,7 +239,7 @@ def make_iso(outputfile):
         print("#cloud-config", file=out)
         yaml.dump(user_data, out, Dumper=MultiLineDumper, sort_keys=False)
     # mkisofs -o $outputfile -preparer mk_seed_ci.py -V config-2 -J -R $tdir >/dev/null 2>&1
-    rc = run_command(["mkisofs", "-o", outputfile, "-preparer", "mk_seed_ci.py",
+    ret = run_command(["mkisofs", "-o", outputfile, "-preparer", "mk_seed_ci.py",
                       "-V", "config-2", "-J", "-R", tdir])
     # Clean up
     # shutil.rmtree(tdir)
@@ -240,13 +248,31 @@ def make_iso(outputfile):
     os.rmdir(lpath)
     os.rmdir(tdir+"/openstack")
     os.rmdir(tdir)
-    if rc:
-        sys.exit(rc)
+    if ret.returncode:
+        sys.exit(ret.returncode)
 
 
 def parse_iso(outputfile):
     "Read ISO and parse settings"
     global meta_data, user_data, i_uuid, hostname, sshkeys, files
+    if not os.access(outputfile, os.R_OK):
+        return
+    # isoinfo -R -i $outputfile -x /openstack/latest/meta_data.json
+    ret = run_command(["isoinfo", "-R", "-i", outputfile, "-x", "/openstack/latest/meta_data.json"])
+    if ret.returncode:
+        sys.exit(ret.returncode)
+    meta_data = json.loads(ret.stdout)
+    # Extract hostname, UUID
+    if "hostname" in meta_data:
+        hostname = meta_data["hostname"]
+    if "uuid" in meta_data:
+        i_uuid = meta_data["uuid"]
+    # TODO: ssh_keys
+    ret = run_command(["isoinfo", "-R", "-i", outputfile, "-x", "/openstack/latest/user_data"])
+    if ret.returncode:
+        sys.exit(ret.returncode)
+    user_data = yaml.safe_load(ret.stdout)
+    # TODO: Extract write_files
 
 
 def main(argv):
