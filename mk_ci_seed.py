@@ -32,6 +32,7 @@ import pwd
 import grp
 import secrets
 import base64
+import gzip
 import uuid
 import json
 import argparse
@@ -61,38 +62,94 @@ def debug_print(*args, **kwa):
         print(*args, **kwa)
 
 
+# Configuration
+MAX_PLAIN_SIZE = 1024 * 10  # 10KB: Files larger than this get gzipped
+# Characters we allow in a "plain" YAML string without fear of injection issues
+ALLOWED_WHITESPACE = {'\n', '\r', '\t'}
+
+
+def encode_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode('utf-8')
+
+
+def encode_gzip_b64(data: bytes) -> str:
+    return base64.b64encode(gzip.compress(data)).decode('utf-8')
+
+
+def is_text_safe(text: str) -> bool:
+    """
+    Checks if the string is composed of printable characters.
+    This prevents injecting control characters that break YAML or Shells.
+    """
+    for char in text:
+        if not char.isprintable() and char not in ALLOWED_WHITESPACE:
+            return False
+    return True
+
+
+def process_file_for_yaml(filepath: str):
+    """
+    Determines the best way to represent a file for YAML injection.
+    Returns a tuple: (representation_type, content)
+    """
+    file_size = os.path.getsize(filepath)
+
+    # Case 1: Large files (Gzip + B64)
+    if file_size > MAX_PLAIN_SIZE:
+        with open(filepath, 'rb') as f:
+            return "gzip_b64", encode_gzip_b64(f.read())
+
+    # Read as bytes for inspection
+    with open(filepath, 'rb') as f:
+        raw_data = f.read()
+
+    # Case 2: Try to see if it is valid UTF-8 text
+    try:
+        text_content = raw_data.decode('utf-8')
+        
+        # Case 2a: It is text, but is it "safe" (no control chars)?
+        if is_text_safe(text_content):
+            return "text/plain", text_content.rstrip('\n')
+        else:
+            # Case 2b: It is text, but has "weird" characters (e.g. \x01)
+            return "b64", encode_b64(raw_data)
+
+    except UnicodeDecodeError:
+        # Case 3: It's binary (cannot be decoded as UTF-8)
+        return "b64", encode_b64(raw_data)
+
+
 class Injection:
     "Data structure for file injections"
-    def __init__(self, unm, gnm, perm,
-                 name="/tmp/dummy", content=""):
+    def __init__(self, unm, gnm, perm, name="/tmp/dummy",
+                 content="", enc="text/plain"):
         self.owner = unm
         self.group = gnm
-        self.permission = perm
+        self.permissions = perm
         self.name = name
         self.content = content
+        self.encoding = enc
 
-    def dict(self):
+    def fields(self) -> dict:
         return {"path": self.name, "content": self.content,
                 "owner": self.owner+":"+self.group,
-                "permissions": oct(self.permission)}
+                "permissions": oct(self.permissions),
+                "encoding": self.encoding}
 
     def __repr__(self):
-        return str(self.dict())
+        return str(self.fields())
 
 
 def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, iname=''):
     "analyze fname and create injection object"
     injname = iname.replace(':', '/')
-    content = open(fname, "r", encoding="utf-8").read().rstrip('\n')
-    # TODO
-    # - Detect binary data and large data (gzip)
-    # - Optionally support a macro processor (m4 or jinja2)
+    enc, content = process_file_for_yaml(fname)
     if preserve:
         st = os.stat(fname)
         return Injection(pwd.getpwuid(st.st_uid).pw_name,
                          grp.getgrgid(st.st_gid).gr_name,
-                         st.st_mode & 0o7777, injname, content)
-    return Injection(user, group, perm, injname, content)
+                         st.st_mode & 0o7777, injname, content, enc)
+    return Injection(user, group, perm, injname, content, enc)
 
 
 def file_injections(folder, preserve=False, user="root", group="root", perm=defperm, prefix=''):
@@ -118,11 +175,13 @@ def append_or_replace(path, inj, udata):
         if wf["path"] == path:
             if wf.get("content") != inj.content:
                 print(f"WARNING: write_files {path} replaced with {inj.content}")
-            # else:
-            #     print(f"INFO: write_files {path} found with identical content")
-            wf = inj.dict()
+            else:
+                debug_print(f"INFO: write_files {path} found with identical content {inj.fields()}")
+            # wf = inj.fields()
+            for key, val in inj.fields().items():
+                wf[key] = val
             return
-    udata.append(inj.dict())
+    udata.append(inj.fields())
 
 
 def apply_file_injections(ifiles):
@@ -193,7 +252,8 @@ def key_injections(keys, replace=False):
                     # Overwrite
                     for k in meta_data["keys"]:
                         if k["name"] == knm:
-                            k = {"name": knm, "type": "ssh", "data": keycontent}
+                            k["type"] = ssh	# likely unchanged ...
+                            k["data"] = keycontent
                             break
                 else:
                     err = "ERROR"
@@ -309,9 +369,15 @@ def parse_iso(outputfile):
     if "write_files" in user_data:
         for ifile in user_data["write_files"]:
             user, group = ifile["owner"].split(":")
-            perm = ifile.get("permissions") or defperm
+            perm = ifile.get("permissions")
+            if perm:
+                perm = int(perm, 8)
+            else:
+                perm = defperm
             path = ifile["path"]
-            files[path] = Injection(user, group, perm, ifile["path"], ifile.get("content"))
+            enc = ifile.get("encoding") or "text/plain"
+            files[path] = Injection(user, group, perm, ifile["path"],
+                                    ifile.get("content"), enc)
 
 
 def main(argv):
