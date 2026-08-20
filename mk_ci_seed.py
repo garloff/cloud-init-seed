@@ -330,7 +330,7 @@ def make_iso(outputfile):
         yaml.dump(user_data, out, Dumper=MultiLineDumper, sort_keys=False)
     # mkisofs -o $outputfile -preparer mk_seed_ci.py -V config-2 -J -R $tdir >/dev/null 2>&1
     ret = run_command(["mkisofs", "-o", outputfile, "-preparer", "mk_seed_ci.py",
-                      "-V", "config-2", "-J", "-R", tdir])
+                      "-V", "config-2", "-R", tdir])
     # Clean up
     # shutil.rmtree(tdir)
     os.remove(lpath+"user_data")
