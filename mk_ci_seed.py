@@ -15,6 +15,7 @@ Options:
             we start with root:root
   -m OCT   new default octal value for permissions (start: 0640)
   -p       do copy ownership and permissions (default: False, use o,m)
+  -P       do copy permissions (default: False, but not ownership)
   -s KEYS  comma-separated list of SSH keyfile to add (use PUBLIC keys!)
   -S KEYS  dito, but reset list
   -r       OK to overwrite ssh keys
@@ -109,7 +110,7 @@ def process_file_for_yaml(filepath: str):
 
         # Case 2a: It is text, but is it "safe" (no control chars)?
         if is_text_safe(text_content):
-            return "text/plain", text_content.rstrip('\n')
+            return "text/plain", text_content  # .rstrip('\n')
         else:
             # Case 2b: It is text, but has "weird" characters (e.g. \x01)
             return "b64", encode_b64(raw_data)
@@ -140,19 +141,20 @@ class Injection:
         return str(self.fields())
 
 
-def inject_file(fname, preserve=False, user="root", group="root", perm=defperm, iname=''):
+def inject_file(fname, preserve=False, keepperm=False, user="root", group="root", perm=defperm, iname=''):
     "analyze fname and create injection object"
     injname = iname.replace(':', '/')
     enc, content = process_file_for_yaml(fname)
-    if preserve:
+    if preserve or keepperm:
         st = os.stat(fname)
-        return Injection(pwd.getpwuid(st.st_uid).pw_name,
-                         grp.getgrgid(st.st_gid).gr_name,
-                         st.st_mode & 0o7777, injname, content, enc)
+        if preserve:
+            user  = pwd.getpwuid(st.st_uid).pw_name
+            group = grp.getgrgid(st.st_gid).gw_name
+        return Injection(user, group, st.st_mode & 0o7777, injname, content, enc)
     return Injection(user, group, perm, injname, content, enc)
 
 
-def file_injections(folder, preserve=False, user="root", group="root", perm=defperm, prefix=''):
+def file_injections(folder, preserve=False, keepperm=False, user="root", group="root", perm=defperm, prefix=''):
     "Create dict with file injections from folder"
     global files
     with os.scandir(folder) as it:
@@ -162,9 +164,9 @@ def file_injections(folder, preserve=False, user="root", group="root", perm=defp
             fullnm = folder+'/'+fnm.name
             pnm = prefix+'/'+fnm.name
             if fnm.is_dir():
-                return file_injections(fullnm, preserve, user, group, perm, pnm)
+                return file_injections(fullnm, preserve, keepperm, user, group, perm, pnm)
             if fnm.is_file():
-                inj = inject_file(fullnm, preserve, user, group, perm, pnm)
+                inj = inject_file(fullnm, preserve, keepperm, user, group, perm, pnm)
                 files[inj.name] = inj
     return None
 
@@ -409,6 +411,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
     parser.add_argument("-o", "--owner", help="Set username:groupname (if preserve is not set), default root:root")
     parser.add_argument("-m", "--mode", help="Set acccess mode (octal value) to be used if preserve is not set, default 0640")
     parser.add_argument("-p", "--preserve", action="store_true", help="Copy owner and access mode from original file (default False)")
+    parser.add_argument("-P", "--permissions", action="store_true", help="Copy access mode from original file but not ownership (default False)")
     parser.add_argument("-U", "--regenerate-uuid", action="store_true", help="Force UUID regeneration (default: False)")
     parser.add_argument("-H", "--hostname", help="Set the hostname (default: read or randomly generated)")
     parser.add_argument("-d", "--debug", action="store_true", help="Enabled debugging output (default: False)")
@@ -454,7 +457,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0""", formatter_class=argparse.RawDescriptio
     for cdir in config_dirs:
         yaml_injections(cdir)
     for fdir in inject_dirs:
-        file_injections(fdir, args.preserve, uid, gid, mode)
+        file_injections(fdir, args.preserve, args.permissions, uid, gid, mode)
     debug_print(meta_data)
     debug_print(files)
     apply_file_injections(files)
