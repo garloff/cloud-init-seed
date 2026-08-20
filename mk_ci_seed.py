@@ -198,8 +198,55 @@ def apply_file_injections(ifiles):
         append_or_replace(key, ifile, user_data["write_files"])
 
 
+def make_hashable(obj):
+    """
+    Helper to convert unhashable types (dict, list) into
+    hashable types (tuples) for deduplication purposes.
+    """
+    if isinstance(obj, dict):
+        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+    elif isinstance(obj, list):
+        return tuple(make_hashable(i) for i in obj)
+    return obj
+
+
+def deep_merge_yaml(base, update):
+    """
+    Recursively merges 'update' into 'base'.
+    - Dicts: Merged (new keys added, existing overwritten).
+    - Lists: Appended and deduplicated.
+    - Scalars: Overwritten.
+    """
+    for key, value in update.items():
+        if key in base:
+            # CASE 1: Both are dictionaries -> Recurse
+            if isinstance(base[key], dict) and isinstance(value, dict):
+                deep_merge_yaml(base[key], value)
+
+            # CASE 2: Both are lists -> Append and Deduplicate
+            elif isinstance(base[key], list) and isinstance(value, list):
+                combined = base[key] + value
+                seen = set()
+                unique_list = []
+                for item in combined:
+                    h = make_hashable(item)
+                    if h not in seen:
+                        unique_list.append(item)
+                        seen.add(h)
+                base[key] = unique_list
+
+            # CASE 3: Types don't match or are scalars -> Overwrite
+            else:
+                base[key] = value
+        else:
+            # CASE 4: Key doesn't exist in base -> Add it
+            base[key] = value
+    return base
+
+
 def yaml_injections(folder):
     "Create dict with yaml pieces from folder"
+    global user_data
     with os.scandir(folder) as it:
         for fnm in it:
             # Ignore hidden files / subdirectories
@@ -212,7 +259,7 @@ def yaml_injections(folder):
                 dct = yaml.full_load_all(open(fullnm, 'r', encoding="utf-8"))
                 for doc in dct:
                     debug_print(f" add {doc}")
-                    user_data.update(doc)
+                    user_data = deep_merge_yaml(user_data, doc)
     return None
 
 
